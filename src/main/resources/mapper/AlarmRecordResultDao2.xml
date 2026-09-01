@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+
+<mapper namespace="com.mobile.safe.dao.AlarmRecordResult2Dao">
+
+<!--    <insert id="insertBatch" parameterType="java.util.List" useGeneratedKeys="true" keyProperty="id">-->
+<!--        insert into safety.alarm_record_result(id, alarm_time, dst_ip, src_ip, alarm_name, payload, is_safe_attack, attack_type, attack_field, attack_port)-->
+<!--        values-->
+<!--        <foreach collection="list" item="entity" separator=",">-->
+<!--                (#{entity.id},#{entity.alarmTime},#{entity.dstIp},#{entity.srcIp},#{entity.alarmName},#{entity.payload},#{entity.isSafeAttack},#{entity.attackType},#{entity.attackField},#{entity.attackPort})-->
+<!--        </foreach>-->
+<!--    </insert>-->
+    <insert id="insertBatch" parameterType="java.util.List">
+        insert into safety.alarm_record_result_test (
+        id, alarm_time, alarm_name, protocol, src_ip, attack_port,
+        dst_ip, payload, is_safe_attack, attack_type, attack_field,
+        is_successful, extract_info_prompt_tokens, extract_info_completion_tokens,
+        extract_info_total_tokens, classify_multi_prompt_tokens, classify_multi_completion_tokens,
+        classify_multi_total_tokens, classify_binary_prompt_tokens, classify_binary_completion_tokens,
+        classify_binary_total_tokens, extract_info_use_time, classify_multi_use_time, classify_binary_use_time
+        )
+        values
+        <foreach collection="list" item="entity" separator=",">
+            (
+            #{entity.id}, #{entity.alarmTime}, #{entity.alarmName}, #{entity.protocol},
+            #{entity.srcIp}, #{entity.attackPort}, #{entity.dstIp}, #{entity.payload},
+            #{entity.isSafeAttack}, #{entity.attackType}, #{entity.attackField},
+            #{entity.isSuccessful}, #{entity.extractInfoPromptTokens},
+            #{entity.extractInfoCompletionTokens}, #{entity.extractInfoTotalTokens},
+            #{entity.classifyMultiPromptTokens}, #{entity.classifyMultiCompletionTokens},
+            #{entity.classifyMultiTotalTokens}, #{entity.classifyBinaryPromptTokens},
+            #{entity.classifyBinaryCompletionTokens}, #{entity.classifyBinaryTotalTokens},
+            #{entity.extractInfoUseTime}, #{entity.classifyMultiUseTime}, #{entity.classifyBinaryUseTime}
+            )
+        </foreach>
+    </insert>
+</mapper>

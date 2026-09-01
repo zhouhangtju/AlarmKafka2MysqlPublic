@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+
+<mapper namespace="com.mobile.safe.dao.AlarmRecordResultDao">
+
+    <insert id="insertBatch" parameterType="java.util.List" useGeneratedKeys="true" keyProperty="id">
+        insert into safety.alarm_record_result(id, alarm_time, dst_ip, src_ip, alarm_name, payload, is_safe_attack, attack_type, attack_field, attack_port)
+        values
+        <foreach collection="list" item="entity" separator=",">
+                (#{entity.id},#{entity.alarmTime},#{entity.dstIp},#{entity.srcIp},#{entity.alarmName},#{entity.payload},#{entity.isSafeAttack},#{entity.attackType},#{entity.attackField},#{entity.attackPort})
+        </foreach>
+    </insert>
+</mapper>
