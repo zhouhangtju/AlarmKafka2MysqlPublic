@@ -23,6 +23,12 @@ public class AlarmRecordResultDTO {
      */
     private String alarmName;
 
+    @JSONField(name = "APP_PROTOCOL")
+    private String appProtocol;
+
+    @JSONField(name = "DEVICE_TYPE")
+    private String deviceType;
+
     @JSONField(name = "PROTOCOL")
     private String protocol;
 

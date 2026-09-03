@@ -52,6 +52,8 @@ spring:
       # acks=all ：只有当所有参与复制的节点全部收到消息时，生产者才会收到一个来自服务器的成功响应。
       acks: 1
     consumer:
+      # 给批量处理留出足够的安全余量，避免因GC或下游抖动触发Rebalance
+      max-poll-interval: 600000  # 10分钟
       # 自动提交的时间间隔 在spring boot 2.X 版本中这里采用的是值的类型为Duration 需要符合特定的格式，如1S,1M,2H,5D
       auto-commit-interval: 1S
       # 该属性指定了消费者在读取一个没有偏移量的分区或者偏移量无效的情况下该作何处理：
@@ -65,7 +67,7 @@ spring:
       # 值的反序列化方式
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       group-id: alarm-consumer-prod-v1
-      max-poll-records: 1000
+      max-poll-records: 500
       fetch-min-size: 1
       fetch-max-wait: 5000
     listener:

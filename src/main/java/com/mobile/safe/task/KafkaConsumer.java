@@ -1,6 +1,7 @@
 package com.mobile.safe.task;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import com.alibaba.fastjson.JSON;
@@ -34,10 +35,12 @@ public class KafkaConsumer {
 
     public static final String TOPIC_TEST = "asap_superset";
 
+    private static final String ISOP_DEVICE_TYPE = "Nsfocus.ISOP";
+
 
     @KafkaListener(topics = TOPIC_TEST, concurrency = "5")
     public void topic_alarm(List<String> messages, Acknowledgment ack) {
-
+        List<String> deviceTypeList = deviceTypeList();
         // 测试
 //        String test = ResourceUtil.readUtf8Str("test.json");
 //        List<String> testList = JSON.parseArray(test, String.class);
@@ -47,11 +50,16 @@ public class KafkaConsumer {
         SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
         sdf.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai"));
         List<AlarmRecordResult> alarmRecordResultList = new ArrayList<>();
-//        List<List<String>> partition = ListUtil.partition(messages, 30);
-//        List<String> strings = partition.get(0);
+
 
         try {
             if (messages != null && !messages.isEmpty()) {
+                String first = messages.get(0);
+                AlarmRecordResultDTO alarmRecordResultDTO = JSON.parseObject(first, AlarmRecordResultDTO.class);
+                Date alarmTime = alarmRecordResultDTO.getCreateTime();
+                SimpleDateFormat sdf2 = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                String alarmTimeStr = sdf2.format(alarmTime);
+                log.info("kafka 当前批次的告警时间：{}", alarmTimeStr);
                 for (String msg : messages) {
 
                     AlarmRecordResultDTO alarm;
@@ -63,6 +71,17 @@ public class KafkaConsumer {
                         continue;
                     }
                     if (alarm == null) continue;
+                    String deviceType = StringUtils.defaultString(alarm.getDeviceType());
+                    String appProtocol = StringUtils.defaultString(alarm.getAppProtocol());
+
+                    // DeviceType ISOP直接放行；其余8种类型AppProtocol必须是 HTTP 协议才放行
+                    boolean pass = ISOP_DEVICE_TYPE.equals(deviceType) || (deviceTypeList.contains(deviceType) && "HTTP".equals(appProtocol));
+                    if (!pass) {
+//                        log.info("告警被过滤: deviceType={}, appProtocol={}, 不满足准入条件(类型是ISOP或类型是其他8种类型+HTTP)", deviceType, appProtocol);
+                        continue;
+                    }
+
+
 
                     // request_payload -> request_message -> payload  字段优先级
                     String content = Optional.ofNullable(alarm.getRequestPayload())
@@ -87,7 +106,7 @@ public class KafkaConsumer {
 
 
                     if (binaryResult == null || binaryResult.getResponse() == null) {
-                        log.warn("safeInterfaceService.classifyBinary 异常 :{} ，跳过");
+                        log.warn("safeInterfaceService.classifyBinary 异常 :{} ，跳过",commonDto);
                         continue;
                     }
 
@@ -123,6 +142,11 @@ public class KafkaConsumer {
                         }
                     }
 
+                    if (multiResult == null || multiResult.getResponse() == null) {
+                        log.warn("safeInterfaceService.multiResult 异常 :{} ，跳过",commonDto);
+                        continue;
+                    }
+
                     String multiAnswer = Optional.ofNullable(multiResult)
                             .map(ClassifyMultiDo::getResponse)
                             .map(ClassifyMultiDo.Response::getResult)
@@ -143,6 +167,10 @@ public class KafkaConsumer {
                             alarm.setExtractInfoCompletionTokens(extractResult.getUsage().getCompletion_tokens());
                             alarm.setExtractInfoTotalTokens(extractResult.getUsage().getTotal_tokens());
                         }
+                    }
+                    if (extractResult == null || extractResult.getResponse() == null) {
+                        log.warn("safeInterfaceService.extractResult 异常 :{} ，跳过",commonDto);
+                        continue;
                     }
 
                     String extractAnswer = Optional.ofNullable(extractResult)
@@ -166,8 +194,9 @@ public class KafkaConsumer {
 
                 alarmRecordResultService.saveAlarmData(alarmRecordResultList);
 
-                log.info("告警数据插入完成 入库的大小：{}",alarmRecordResultList.size());
-
+                if(CollUtil.isNotEmpty(alarmRecordResultList)){
+                    log.info("批次告警数据插入完成 入库的大小：{} One ：{}",alarmRecordResultList.size(),JSON.toJSONString(alarmRecordResultList.get(0)));
+                }
             }else{
                 log.info("kafka 消息条数为空");
             }
@@ -177,6 +206,21 @@ public class KafkaConsumer {
         } finally {
             ack.acknowledge();
         }
+    }
+
+
+    public List<String> deviceTypeList(){
+        List <String> deviceTypeList = new ArrayList<>();
+        deviceTypeList.add("DBApp_AT");
+        deviceTypeList.add("H3C_IDS");
+        deviceTypeList.add("Nsfocus_IDS");
+        deviceTypeList.add("Nsfocus_FLOW");
+        deviceTypeList.add("Nsfocus_FLOW_5G");
+        deviceTypeList.add("Dptech_WAF");
+        deviceTypeList.add("Nsfocus_FLOW_NEW");
+        deviceTypeList.add("Nsfocus_FLOW_DPI");
+        deviceTypeList.add("Nsfocus.ISOP");
+        return deviceTypeList;
     }
 
 
