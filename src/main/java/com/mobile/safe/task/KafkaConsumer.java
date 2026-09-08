@@ -324,7 +324,12 @@ public class KafkaConsumer {
                 commonDto.setContent(Collections.singletonList(payloadStr));
                 ai(alarmRecordResultDTO, commonDto);
             } else if ("No".equalsIgnoreCase(content.trim())) {
-                log.info("大模型调用返回No，跳过");
+                log.info("大模型调用返回No");
+                AlarmRecordResult alarmRecordResult = new AlarmRecordResult();
+                BeanUtil.copyProperties(alarmRecordResultDTO, alarmRecordResult);
+                alarmRecordResult.setAlarmTime(alarmRecordResultDTO.getCreateTime());
+                alarmRecordResultService.save(alarmRecordResult);
+
             } else {
                 log.warn("大模型返回非预期内容:'{}'，跳过", content);
             }
@@ -436,50 +441,50 @@ public class KafkaConsumer {
                 .orElse("");
         alarm.setIsSafeAttack(binaryAnswer);
 
-        if (!"Yes".equalsIgnoreCase(binaryAnswer)) {
-            return null;
-        }
+        if ("Yes".equalsIgnoreCase(binaryAnswer)) {
+            //  外层msgExecutor已并行
+            commonDto.setAdapter("multi_cate");
+            ClassifyMultiDo multiResult = safeInterfaceService.classifyMulti(commonDto);
+            ExtractInfoDo extractResult = safeInterfaceService.extractInfo(commonDto);
 
-        //  外层msgExecutor已并行
-        commonDto.setAdapter("multi_cate");
-        ClassifyMultiDo multiResult = safeInterfaceService.classifyMulti(commonDto);
-        ExtractInfoDo extractResult = safeInterfaceService.extractInfo(commonDto);
-
-        if (multiResult != null) {
-            alarm.setClassifyMultiUseTime(multiResult.getUse_time());
-            if (multiResult.getUsage() != null) {
-                alarm.setClassifyMultiPromptTokens(multiResult.getUsage().getPrompt_tokens());
-                alarm.setClassifyMultiCompletionTokens(multiResult.getUsage().getCompletion_tokens());
-                alarm.setClassifyMultiTotalTokens(multiResult.getUsage().getTotal_tokens());
+            if (multiResult != null) {
+                alarm.setClassifyMultiUseTime(multiResult.getUse_time());
+                if (multiResult.getUsage() != null) {
+                    alarm.setClassifyMultiPromptTokens(multiResult.getUsage().getPrompt_tokens());
+                    alarm.setClassifyMultiCompletionTokens(multiResult.getUsage().getCompletion_tokens());
+                    alarm.setClassifyMultiTotalTokens(multiResult.getUsage().getTotal_tokens());
+                }
             }
-        }
-        if (multiResult == null || multiResult.getResponse() == null) {
-            log.warn("safeInterfaceService.multiResult 异常:{}，跳过", commonDto);
-            return null;
-        }
-        String multiAnswer = Optional.ofNullable(multiResult)
-                .map(ClassifyMultiDo::getResponse)
-                .map(ClassifyMultiDo.Response::getResult)
-                .orElse("");
-        alarm.setAttackType(multiAnswer);
-
-        if (extractResult != null) {
-            alarm.setExtractInfoUseTime(extractResult.getUse_time());
-            if (extractResult.getUsage() != null) {
-                alarm.setExtractInfoPromptTokens(extractResult.getUsage().getPrompt_tokens());
-                alarm.setExtractInfoCompletionTokens(extractResult.getUsage().getCompletion_tokens());
-                alarm.setExtractInfoTotalTokens(extractResult.getUsage().getTotal_tokens());
+            if (multiResult == null || multiResult.getResponse() == null) {
+                log.warn("safeInterfaceService.multiResult 异常:{}，跳过", commonDto);
+                return null;
             }
+            String multiAnswer = Optional.ofNullable(multiResult)
+                    .map(ClassifyMultiDo::getResponse)
+                    .map(ClassifyMultiDo.Response::getResult)
+                    .orElse("");
+            alarm.setAttackType(multiAnswer);
+
+            if (extractResult != null) {
+                alarm.setExtractInfoUseTime(extractResult.getUse_time());
+                if (extractResult.getUsage() != null) {
+                    alarm.setExtractInfoPromptTokens(extractResult.getUsage().getPrompt_tokens());
+                    alarm.setExtractInfoCompletionTokens(extractResult.getUsage().getCompletion_tokens());
+                    alarm.setExtractInfoTotalTokens(extractResult.getUsage().getTotal_tokens());
+                }
+            }
+            if (extractResult == null || extractResult.getResponse() == null) {
+                log.warn("safeInterfaceService.extractResult 异常:{}，跳过", commonDto);
+                return null;
+            }
+            String extractAnswer = Optional.ofNullable(extractResult)
+                    .map(ExtractInfoDo::getResponse)
+                    .map(ExtractInfoDo.ResponseData::getResult)
+                    .orElse("");
+            alarm.setAttackField(extractAnswer);
         }
-        if (extractResult == null || extractResult.getResponse() == null) {
-            log.warn("safeInterfaceService.extractResult 异常:{}，跳过", commonDto);
-            return null;
-        }
-        String extractAnswer = Optional.ofNullable(extractResult)
-                .map(ExtractInfoDo::getResponse)
-                .map(ExtractInfoDo.ResponseData::getResult)
-                .orElse("");
-        alarm.setAttackField(extractAnswer);
+
+
 
         AlarmRecordResult alarmRecordResult = new AlarmRecordResult();
         BeanUtil.copyProperties(alarm, alarmRecordResult);
