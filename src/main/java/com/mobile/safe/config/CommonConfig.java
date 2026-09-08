@@ -29,11 +29,11 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class CommonConfig {
 
-    @Value("${remote.maxTotalConnect:64}")
-    private int maxTotalConnect; //连接池的最大连接数默认为40
+    @Value("${remote.maxTotalConnect:128}")
+    private int maxTotalConnect; //连接池最大连接数，默认128
 
-    @Value("${remote.maxConnectPerRoute:64}")
-    private int maxConnectPerRoute; //单个主机的最大连接数40
+    @Value("${remote.maxConnectPerRoute:128}")
+    private int maxConnectPerRoute; //单个目标主机最大连接数，默认128
 
     @Value("${remote.connectTimeout:60000}")
     private int connectTimeout; //连接超时默认60s
@@ -60,8 +60,8 @@ public class CommonConfig {
         try {
             //Httpclient连接池，长连接保持时间
             PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(1, TimeUnit.HOURS);
-            connectionManager.setMaxTotal(64);
-            connectionManager.setDefaultMaxPerRoute(64);
+            connectionManager.setMaxTotal(this.maxTotalConnect);
+            connectionManager.setDefaultMaxPerRoute(this.maxConnectPerRoute);
 
             HttpClient httpClient = HttpClientBuilder.create().setMaxConnTotal(this.maxTotalConnect)
                     .setConnectionManager(connectionManager)

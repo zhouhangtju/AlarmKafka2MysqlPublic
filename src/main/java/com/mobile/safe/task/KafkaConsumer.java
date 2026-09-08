@@ -24,6 +24,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import javax.annotation.PreDestroy;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -54,9 +55,24 @@ public class KafkaConsumer {
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Shanghai"));
 
 
-    private final ExecutorService msgExecutor = new ThreadPoolExecutor(
-            32, 64, 60L, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(400),
+    private static final int API_CONCURRENCY = 128;
+    private static final int API_QUEUE_CAPACITY = 1024;
+    private final Object metricsLock = new Object();
+    private int metricsCompletedCount;
+    private long metricsEarliestStartNanos;
+    private long metricsTotalTaskNanos;
+    private long metricsMaxTaskNanos;
+
+    /**
+     * 所有 Kafka listener 共享同一个执行器，使不同 poll 批次中筛选出的告警可以一起填满工作线程。
+     *
+     * core/max 使用相同值，确保实际并发稳定在 API_CONCURRENCY。
+     * 队列满时阻塞提交线程形成背压，避免 CallerRunsPolicy 让 8 个 Kafka listener 额外调用接口，
+     * 从而突破设定的并发上限。
+     */
+    private final ThreadPoolExecutor msgExecutor = new ThreadPoolExecutor(
+            API_CONCURRENCY, API_CONCURRENCY, 0L, TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>(API_QUEUE_CAPACITY),
             new ThreadFactory() {
                 private final AtomicInteger counter = new AtomicInteger(0);
                 @Override
@@ -66,8 +82,37 @@ public class KafkaConsumer {
                     return t;
                 }
             },
-            new ThreadPoolExecutor.CallerRunsPolicy()
+            (task, executor) -> {
+                if (executor.isShutdown()) {
+                    throw new RejectedExecutionException("告警接口执行器已关闭");
+                }
+                try {
+                    executor.getQueue().put(task);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RejectedExecutionException("等待告警接口队列时被中断", e);
+                }
+            }
     );
+
+    {
+        msgExecutor.prestartAllCoreThreads();
+    }
+
+    @PreDestroy
+    public void shutdownMsgExecutor() {
+        msgExecutor.shutdown();
+        try {
+            if (!msgExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                log.warn("应用关闭时告警队列仍未清空: waiting={}, active={}",
+                        msgExecutor.getQueue().size(), msgExecutor.getActiveCount());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("等待告警队列关闭时被中断: waiting={}, active={}",
+                    msgExecutor.getQueue().size(), msgExecutor.getActiveCount());
+        }
+    }
 
 
     private final RestTemplate restTemplate = new RestTemplate();
@@ -81,8 +126,6 @@ public class KafkaConsumer {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
 
-    private static final long BATCH_TIMEOUT_MIN = 10;
-
     @KafkaListener(topics = TOPIC_TEST, concurrency = "8")
     public void topic_alarm(List<String> messages, Acknowledgment ack) {
         if (CollUtil.isEmpty(messages)) {
@@ -92,75 +135,96 @@ public class KafkaConsumer {
 
         log.info("获取到kafka消息条数:{}, 线程:{}", messages.size(), Thread.currentThread().getName());
 
-        boolean hasError = false;
-        boolean isTimeout = false;
-        Queue<AlarmRecordResult> results = new ConcurrentLinkedQueue<>();
         AtomicInteger errorCount = new AtomicInteger(0);
+        AtomicInteger queuedCount = new AtomicInteger(0);
 
         try {
             //  第一条消息 处理 80/20 =====
 //            processFirstMessageSafely(messages.get(0));
 
-            //  剩余消息：并行处理 =====
-            List<CompletableFuture<Void>> futures = new ArrayList<>(messages.size() - 1);
-            long startTime = System.currentTimeMillis();
-            for (int i = 1; i < messages.size(); i++) {
-                final String msg = messages.get(i);
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    try {
-                        AlarmRecordResult r = processSingleMessage(msg);
-                        if (r != null) {
-                            results.add(r);
-                        }
-                    } catch (Throwable t) {
-                        errorCount.incrementAndGet();
-                        log.error("单条消息处理异常, raw={}", msg, t);
-                    }
-                }, msgExecutor);
-                futures.add(future);
-            }
-
-
-            if (!futures.isEmpty()) {
+            // 先过滤再入共享队列，避免不符合条件的消息占用接口工作线程。
+            List<AlarmRecordResultDTO> qualifiedAlarms = new ArrayList<>();
+            for (String msg : messages) {
                 try {
-                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(BATCH_TIMEOUT_MIN, TimeUnit.MINUTES);
-                } catch (TimeoutException e) {
-                    isTimeout = true;
-                    log.error("批次处理超时(>{}min)，", BATCH_TIMEOUT_MIN);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    hasError = true;
-                    log.error("批次处理被中断");
-                } catch (ExecutionException e) {
-                    hasError = true;
-                    log.error("批次处理执行异常", e);
+                    AlarmRecordResultDTO alarm = parseQualifiedAlarm(msg);
+                    if (alarm != null) {
+                        qualifiedAlarms.add(alarm);
+                    }
+                } catch (Throwable t) {
+                    errorCount.incrementAndGet();
+                    log.error("单条消息解析异常, raw={}", msg, t);
                 }
             }
 
-            // ===== 批量入库 =====
-            List<AlarmRecordResult> resultList = new ArrayList<>(results);
-            if (!resultList.isEmpty()) {
-                alarmRecordResultService.saveAlarmData(resultList);
-                log.info("批次入库完成 size={} 异常={}", resultList.size(), errorCount.get());
-            } else {
-                log.info("本批次无可入库数据，异常={}", errorCount.get());
+            log.info("当前 Kafka 批次符合接口调用条件的告警数:{}, 共享队列等待数:{}, 接口处理中:{}",
+                    qualifiedAlarms.size(), msgExecutor.getQueue().size(), msgExecutor.getActiveCount());
+
+            // 只负责入队，不在 Kafka listener 中等待接口完成。这样后续 poll 的小批次可以继续
+            // 补充共享队列；只要全局有足够积压，worker 就会持续满负荷运行。
+            for (AlarmRecordResultDTO alarm : qualifiedAlarms) {
+                msgExecutor.execute(() -> {
+                    long taskStartNanos = System.nanoTime();
+                    try {
+                        AlarmRecordResult r = processQualifiedAlarm(alarm);
+                        if (r != null) {
+                            alarmRecordResultService.save(r);
+                        }
+                    } catch (Throwable t) {
+                        log.error("单条告警接口处理异常, srcIp={}, dstIp={}",
+                                alarm.getSrcIp(), alarm.getDstIp(), t);
+                    } finally {
+                        recordTaskMetrics(taskStartNanos, System.nanoTime());
+                    }
+                });
+                queuedCount.incrementAndGet();
             }
 
-            long endTime = System.currentTimeMillis();
-            log.info("============================== 当前批次 并行处理耗时: {}s", (endTime - startTime) / 1000.0);
-
-
+            log.info("Kafka 批次入队完成: 原始消息数={}, 符合条件数={}, 入队数={}, 解析异常={}, " +
+                            "共享队列等待数={}, 接口处理中={}",
+                    messages.size(), qualifiedAlarms.size(), queuedCount.get(), errorCount.get(),
+                    msgExecutor.getQueue().size(), msgExecutor.getActiveCount());
         } catch (Exception e) {
-            hasError = true;
-            log.error("消费数据故障", e);
+            log.error("消费数据入队故障: 已入队={}, 原始消息数={}", queuedCount.get(), messages.size(), e);
         } finally {
+            // ACK 表示本批消息已进入进程内队列；接口失败仍沿用原逻辑记录日志并跳过。
             ack.acknowledge();
+        }
+    }
 
-            if (!hasError && !isTimeout && errorCount.get() == 0) {
-                log.info("批次消费成功 size={}", messages.size());
-            } else {
-                log.warn("批次已跳过并ACK: hasError={} isTimeout={} errorCount={} size={}",
-                        hasError, isTimeout, errorCount.get(), messages.size());
+    /**
+     * 每完成一个并发窗口的告警处理链输出一次吞吐统计。任务耗时包含接口调用和最终入库；
+     * 窗口耗时从其中最早开始的任务算到最后一条完成。
+     */
+    private void recordTaskMetrics(long taskStartNanos, long taskEndNanos) {
+        synchronized (metricsLock) {
+            if (metricsCompletedCount == 0 || taskStartNanos < metricsEarliestStartNanos) {
+                metricsEarliestStartNanos = taskStartNanos;
+            }
+
+            long taskNanos = taskEndNanos - taskStartNanos;
+            metricsTotalTaskNanos += taskNanos;
+            metricsMaxTaskNanos = Math.max(metricsMaxTaskNanos, taskNanos);
+            metricsCompletedCount++;
+
+            if (metricsCompletedCount == API_CONCURRENCY) {
+                double windowSeconds = (taskEndNanos - metricsEarliestStartNanos) / 1_000_000_000.0;
+                double averageMillis = metricsTotalTaskNanos / (double) API_CONCURRENCY / 1_000_000.0;
+                double maxMillis = metricsMaxTaskNanos / 1_000_000.0;
+                double throughput = windowSeconds > 0 ? API_CONCURRENCY / windowSeconds : 0;
+
+                log.info("{}条告警处理完成: 窗口耗时={}s, 单条平均耗时={}ms, 单条最大耗时={}ms, " +
+                                "吞吐量={}条/s, 共享队列等待数={}, 接口处理中={}",
+                        API_CONCURRENCY,
+                        String.format(Locale.ROOT, "%.3f", windowSeconds),
+                        String.format(Locale.ROOT, "%.1f", averageMillis),
+                        String.format(Locale.ROOT, "%.1f", maxMillis),
+                        String.format(Locale.ROOT, "%.2f", throughput),
+                        msgExecutor.getQueue().size(), msgExecutor.getActiveCount());
+
+                metricsCompletedCount = 0;
+                metricsEarliestStartNanos = 0;
+                metricsTotalTaskNanos = 0;
+                metricsMaxTaskNanos = 0;
             }
         }
     }
@@ -323,7 +387,7 @@ public class KafkaConsumer {
     /**
      * 单条消息
      */
-    private AlarmRecordResult processSingleMessage(String msg) {
+    private AlarmRecordResultDTO parseQualifiedAlarm(String msg) {
         AlarmRecordResultDTO alarm = JSON.parseObject(msg, AlarmRecordResultDTO.class);
         if (alarm == null) return null;
 
@@ -336,6 +400,11 @@ public class KafkaConsumer {
         String content = resolveContent(alarm);
         if (StringUtils.isBlank(content)) return null;
 
+        return alarm;
+    }
+
+    private AlarmRecordResult processQualifiedAlarm(AlarmRecordResultDTO alarm) {
+        String content = resolveContent(alarm);
         return getAlarmRecordResult(content, alarm);
     }
 
